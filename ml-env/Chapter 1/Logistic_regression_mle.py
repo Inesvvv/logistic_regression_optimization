@@ -1,3 +1,8 @@
+"""
+Created 07/02/2026
+Implementation of MLE 
+"""
+
 import numpy as np
 from scipy.optimize import minimize
 
