@@ -20,18 +20,18 @@ import numpy as np
 Sinkhorn uses a lot of log sum of exp formulas so we first implement a utility function
 Issue is that exp can overflow when inputs are too large so trick is that we substract the max of a from each explonential in the sum
 """
-def logsumexp(a, axis=None, keepdims = False):
-    a_max = np.max(a, axis=None, keepdims = True)
-    out = a_max + np.log(np.sum(np.exp(a - a_max), axis=None, keepdims= True))
-    if not keepdims: 
+def logsumexp(a, axis=None, keepdims=False):
+    a_max = np.max(a, axis=axis, keepdims=True)
+    out = a_max + np.log(np.sum(np.exp(a - a_max), axis=axis, keepdims=True))
+    if not keepdims:
         out = np.squeeze(out, axis=axis)
-    return out 
+    return out
 
 """
 Soft thresholding implementation --> its the proximal operator for lambda l1 norm, its what creates sparsity
 """
 def soft_threshold(z, lam):
-    return np.sign(z)*np.max(np.abs(z)-lam, 0.0)
+    return np.sign(z)*np.maximum(np.abs(z)-lam, 0.0)
 
 """
 Cost, output is a NxN matrix 
@@ -44,13 +44,24 @@ Sinkhorn to update u and v
 """
 def sinkhorn_one_pass(p,q,C,u,v):
     u = np.log(p) - logsumexp(v[None,:] - C, axis=1)
-    v = np.log(p) - logsumexp(u[:, None] - C, axis=0)
+    v = np.log(q) - logsumexp(u[:, None] - C, axis=0)
+    return u, v
 
 """
 compute pi to reconstruct the current transport plan 
 """
 def compute_pi(u,v,C):
     return np.exp(u[:, None]+v[None,:]-C)
+
+
+"""
+Objective: KL(hat_pi || pi) + gamma * ||beta||_1
+where pi is the current Sinkhorn plan for cost C_beta
+"""
+def sista_objective(hat_pi, pi, beta, gamma):
+    log_ratio = np.log(hat_pi / (pi + 1e-30) + 1e-30)
+    kl = np.sum(hat_pi * log_ratio)
+    return kl + gamma * np.sum(np.abs(beta))
 
 
 """
@@ -73,8 +84,9 @@ def sista(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
     v = np.zeros(N) if v0 is None else v0.astype(float).copy()
 
     prev_beta = beta.copy()
+    history = []
 
-    for t in range(n_iters): #could do a while but assume don't know converges so need finite iterations
+    for t in range(n_iters):
         # (1) cost from beta
         C = build_cost(beta, D)
 
@@ -84,6 +96,7 @@ def sista(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
 
         # (3) current plan from u,v,beta
         pi = compute_pi(u, v, C)
+        history.append(sista_objective(hat_pi, pi, beta, gamma))
 
         # (4) gradient wrt beta_k: g_k = <hat_pi - pi, D[k]>
         diff = (hat_pi - pi)
@@ -99,7 +112,7 @@ def sista(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
             break
         prev_beta = beta
 
-    return beta, u, v
+    return beta, u, v, history
 
 
 """
@@ -123,6 +136,7 @@ def sista_newton(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
     v = np.zeros(N) if v0 is None else v0.astype(float).copy()
 
     prev_beta = beta.copy()
+    history = []
 
     for t in range(n_iters):
         # (1) cost from beta
@@ -134,6 +148,7 @@ def sista_newton(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
 
         # (3) current plan
         pi = compute_pi(u, v, C)
+        history.append(sista_objective(hat_pi, pi, beta, gamma))
 
         # (4) gradient: g_k = <hat_pi - pi, D[k]>
         diff = (hat_pi - pi)
@@ -156,4 +171,139 @@ def sista_newton(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
             break
         prev_beta = beta
 
-    return beta, u, v
+    return beta, u, v, history
+
+
+# =============================================
+# COMPARISON: Proximal Gradient vs Newton
+# =============================================
+if __name__ == "__main__":
+    import time
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    np.random.seed(42)
+
+    N = 15
+    K = 8
+    gamma = 1e-3
+    n_iters = 500
+    sinkhorn_inner = 10
+
+    # Random dictionary of N x N cost matrices
+    D = np.random.rand(K, N, N) * 0.5
+    D = (D + D.transpose(0, 2, 1)) / 2
+
+    # Ground truth: sparse beta (only 3 out of 8 are nonzero)
+    true_beta = np.array([0.0, 1.2, 0.0, 0.0, -0.8, 0.0, 0.5, 0.0])
+
+    # Build ground truth cost and plan
+    C_true = build_cost(true_beta, D)
+    hat_pi = np.exp(-C_true)
+    hat_pi = hat_pi / hat_pi.sum()
+    p = hat_pi.sum(axis=1)
+    q = hat_pi.sum(axis=0)
+
+    # --- Run proximal gradient SISTA ---
+    t0 = time.time()
+    beta_pg, _, _, hist_pg = sista(
+        p, q, hat_pi, D, gamma=gamma,
+        rho=0.5, n_iters=n_iters, sinkhorn_inner=sinkhorn_inner, tol=1e-12
+    )
+    time_pg = time.time() - t0
+
+    # --- Run Newton SISTA ---
+    t0 = time.time()
+    beta_nw, _, _, hist_nw = sista_newton(
+        p, q, hat_pi, D, gamma=gamma,
+        n_iters=n_iters, sinkhorn_inner=sinkhorn_inner, tol=1e-12
+    )
+    time_nw = time.time() - t0
+
+    # =============================================
+    # Print results
+    # =============================================
+    print("=" * 65)
+    print("SISTA COMPARISON: Proximal Gradient vs Proximal Newton")
+    print("=" * 65)
+    header = f"{'':>6} {'True':>8} {'ProxGrad':>10} {'Newton':>10}"
+    print(header)
+    print("-" * 65)
+    for k in range(K):
+        print(f"β_{k:<4} {true_beta[k]:>8.4f} {beta_pg[k]:>10.4f} {beta_nw[k]:>10.4f}")
+
+    print(f"\nIterations:    ProxGrad = {len(hist_pg):<6}  Newton = {len(hist_nw)}")
+    print(f"Wall time:     ProxGrad = {time_pg:.4f}s   Newton = {time_nw:.4f}s")
+    print(f"Final obj:     ProxGrad = {hist_pg[-1]:.6f}  Newton = {hist_nw[-1]:.6f}")
+
+    sparsity_pg = np.sum(np.abs(beta_pg) < 1e-4)
+    sparsity_nw = np.sum(np.abs(beta_nw) < 1e-4)
+    print(f"Zeros found:   ProxGrad = {sparsity_pg}/{K}       Newton = {sparsity_nw}/{K}")
+    print(f"||β - β_true||: ProxGrad = {np.linalg.norm(beta_pg - true_beta):.6f}"
+          f"  Newton = {np.linalg.norm(beta_nw - true_beta):.6f}")
+
+    # =============================================
+    # Plot 1: Convergence + Plot 2: Coefficients
+    # =============================================
+    opt_val = min(hist_pg[-1], hist_nw[-1])
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.55, 0.45],
+        subplot_titles=["Convergence (log scale)", "Recovered Coefficients"],
+        horizontal_spacing=0.12,
+    )
+
+    for name, hist, color, dash in [
+        ("Proximal Gradient", hist_pg, "#FF6B35", "solid"),
+        ("Proximal Newton",   hist_nw, "#4ECDC4", "solid"),
+    ]:
+        subopt = np.array(hist) - opt_val + 1e-14
+        fig.add_trace(go.Scatter(
+            x=list(range(len(hist))),
+            y=subopt,
+            mode="lines",
+            name=name,
+            line=dict(color=color, width=2.5, dash=dash),
+        ), row=1, col=1)
+
+    labels = [f"β_{k}" for k in range(K)]
+
+    fig.add_trace(go.Bar(
+        y=labels, x=true_beta, orientation="h",
+        name="True β", marker_color="rgba(255,255,255,0.15)",
+    ), row=1, col=2)
+    fig.add_trace(go.Bar(
+        y=labels, x=beta_pg, orientation="h",
+        name="ProxGrad", marker_color="#FF6B35",
+    ), row=1, col=2)
+    fig.add_trace(go.Bar(
+        y=labels, x=beta_nw, orientation="h",
+        name="Newton", marker_color="#4ECDC4",
+    ), row=1, col=2)
+
+    fig.update_layout(
+        title=dict(
+            text=f"SISTA: Proximal Gradient vs Newton  (K={K}, N={N}, γ={gamma})",
+            font=dict(size=18, color="#F5F5F0", family="Georgia, serif"),
+        ),
+        template="plotly_dark",
+        paper_bgcolor="#0B0C10",
+        plot_bgcolor="#0B0C10",
+        font=dict(family="Georgia, serif", color="#E8E8E0"),
+        barmode="group",
+        height=520,
+        width=1100,
+        legend=dict(orientation="h", y=-0.12, x=0.0, font=dict(size=12)),
+    )
+
+    fig.update_yaxes(row=1, col=1, title="F(β_k) − F*", type="log",
+                     gridcolor="rgba(50,50,50,0.3)")
+    fig.update_xaxes(row=1, col=1, title="Iteration",
+                     gridcolor="rgba(50,50,50,0.3)")
+    fig.update_xaxes(row=1, col=2, title="Coefficient value",
+                     gridcolor="rgba(50,50,50,0.3)", zeroline=True,
+                     zerolinecolor="rgba(100,100,100,0.5)")
+    fig.update_yaxes(row=1, col=2, gridcolor="rgba(50,50,50,0.1)")
+
+    fig.show()
