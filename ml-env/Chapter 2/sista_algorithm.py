@@ -1,7 +1,7 @@
 """
 Created 21/02/2026
-This file implements the SISTA algorithm with proximal gradient descent 
-Later need to implement it with newton method and compare convergence
+This file implements the SISTA algorithm with proximal gradient descent as well as with the Newton Method instead of proximal gradient descent
+which allows us to compare both methods. 
 
 Here we can't use gradient descent because the L1 norm is not differentiable at 0 so we use ISTA (proximal gradient descent). 
 SISTA alternates between: 
@@ -25,7 +25,7 @@ def logsumexp(a, axis=None, keepdims=False):
     out = a_max + np.log(np.sum(np.exp(a - a_max), axis=axis, keepdims=True))
     if not keepdims:
         out = np.squeeze(out, axis=axis)
-    return out
+    return out 
 
 """
 Soft thresholding implementation --> its the proximal operator for lambda l1 norm, its what creates sparsity
@@ -155,6 +155,7 @@ def sista_newton(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
         g = np.tensordot(D, diff, axes=([1, 2], [0, 1]))  # (K,)
 
         # (5a) Hessian diagonal: H_kk = Var_pi(D[k]) = <pi, D[k]^2> - <pi, D[k]>^2
+        # flattening to allow to compute expectation as a dot product instead of double sum
         D_flat = D.reshape(K, -1)         # (K, N*N)
         pi_flat = pi.ravel()              # (N*N,)
         mean_k = D_flat @ pi_flat         # (K,)  E_pi[D_k]
@@ -162,6 +163,10 @@ def sista_newton(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
         H_diag = mean_sq_k - mean_k**2 + mu  # (K,) add mu for numerical stability
 
         # (5b) Proximal Newton update (coordinate-wise)
+        """
+        If H_kk is large (high curvature) then small step, small threshold since need to be careful 
+        If H_kk small (flat curvature) then big step and bog threshold since safe to move aggressively 
+        """
         z = beta - g / H_diag
         beta = soft_threshold(z, gamma / H_diag)
 
@@ -175,7 +180,8 @@ def sista_newton(p, q, hat_pi, D, beta0=None, u0=None, v0=None,
 
 
 # =============================================
-# COMPARISON: Proximal Gradient vs Newton
+# TEST 1
+# BASIC COMPARISON: Proximal Gradient vs Newton 
 # =============================================
 if __name__ == "__main__":
     import time
@@ -187,7 +193,7 @@ if __name__ == "__main__":
     N = 15
     K = 8
     gamma = 1e-3
-    n_iters = 500
+    n_iters = 10000
     sinkhorn_inner = 10
 
     # Random dictionary of N x N cost matrices
@@ -233,7 +239,7 @@ if __name__ == "__main__":
         print(f"β_{k:<4} {true_beta[k]:>8.4f} {beta_pg[k]:>10.4f} {beta_nw[k]:>10.4f}")
 
     print(f"\nIterations:    ProxGrad = {len(hist_pg):<6}  Newton = {len(hist_nw)}")
-    print(f"Wall time:     ProxGrad = {time_pg:.4f}s   Newton = {time_nw:.4f}s")
+    print(f"Time:     ProxGrad = {time_pg:.4f}s   Newton = {time_nw:.4f}s")
     print(f"Final obj:     ProxGrad = {hist_pg[-1]:.6f}  Newton = {hist_nw[-1]:.6f}")
 
     sparsity_pg = np.sum(np.abs(beta_pg) < 1e-4)
@@ -307,3 +313,67 @@ if __name__ == "__main__":
     fig.update_yaxes(row=1, col=2, gridcolor="rgba(50,50,50,0.1)")
 
     fig.show()
+
+    # =============================================
+    # TEST 2: Scenario where proximal gradient beats Newton
+    # Large K, few Sinkhorn iterations → noisy Hessian hurts Newton
+    # =============================================
+    print("\n\n")
+    print("=" * 65)
+    print("TEST 2: Large K + few Sinkhorn iters (noisy Hessian)")
+    print("=" * 65)
+
+    np.random.seed(7)
+
+    N2 = 10
+    K2 = 200
+    gamma2 = 1e-4
+    sinkhorn_inner2 = 1  # deliberately few → π is approximate → Hessian is noisy
+
+    D2 = np.random.randn(K2, N2, N2) * 2.0
+    D2 = (D2 + D2.transpose(0, 2, 1)) / 2
+
+    true_beta2 = np.zeros(K2)
+    true_beta2[10] = 0.8
+    true_beta2[50] = -0.6
+    true_beta2[99] = 0.3
+
+    C_true2 = build_cost(true_beta2, D2)
+    hat_pi2 = np.exp(-C_true2)
+    hat_pi2 = hat_pi2 / hat_pi2.sum()
+    p2 = hat_pi2.sum(axis=1)
+    q2 = hat_pi2.sum(axis=0)
+
+    n_iters2 = 200
+
+    t0 = time.time()
+    beta_pg2, _, _, hist_pg2 = sista(
+        p2, q2, hat_pi2, D2, gamma=gamma2,
+        rho=0.01, n_iters=n_iters2, sinkhorn_inner=sinkhorn_inner2, tol=1e-12
+    )
+    time_pg2 = time.time() - t0
+
+    t0 = time.time()
+    beta_nw2, _, _, hist_nw2 = sista_newton(
+        p2, q2, hat_pi2, D2, gamma=gamma2,
+        n_iters=n_iters2, sinkhorn_inner=sinkhorn_inner2, tol=1e-12
+    )
+    time_nw2 = time.time() - t0
+
+    print(f"\nK = {K2} dictionary elements, N = {N2}, sinkhorn_inner = {sinkhorn_inner2}")
+    print(f"\nIterations:     ProxGrad = {len(hist_pg2):<6}  Newton = {len(hist_nw2)}")
+    print(f"Wall time:      ProxGrad = {time_pg2:.4f}s   Newton = {time_nw2:.4f}s")
+    print(f"Final obj:      ProxGrad = {hist_pg2[-1]:.6f}  Newton = {hist_nw2[-1]:.6f}")
+
+    sparsity_pg2 = np.sum(np.abs(beta_pg2) < 1e-4)
+    sparsity_nw2 = np.sum(np.abs(beta_nw2) < 1e-4)
+    print(f"Zeros found:    ProxGrad = {sparsity_pg2}/{K2}    Newton = {sparsity_nw2}/{K2}  (true = {K2-3}/{K2})")
+    print(f"||β - β_true||: ProxGrad = {np.linalg.norm(beta_pg2 - true_beta2):.6f}"
+          f"  Newton = {np.linalg.norm(beta_nw2 - true_beta2):.6f}")
+
+    print(f"\nNonzero coefficients recovered (true indices: 10, 50, 99):")
+    for label, b in [("ProxGrad", beta_pg2), ("Newton  ", beta_nw2)]:
+        nonzero_idx = np.where(np.abs(b) > 1e-4)[0]
+        vals = b[nonzero_idx]
+        pairs = [f"β_{i}={v:.4f}" for i, v in zip(nonzero_idx, vals)]
+        print(f"  {label}: {', '.join(pairs) if pairs else '(all zero)'}")
