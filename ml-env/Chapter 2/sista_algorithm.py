@@ -315,65 +315,82 @@ if __name__ == "__main__":
     fig.show()
 
     # =============================================
-    # TEST 2: Scenario where proximal gradient beats Newton
-    # Large K, few Sinkhorn iterations → noisy Hessian hurts Newton
+    # Helper to run one comparison and print results
     # =============================================
-    print("\n\n")
-    print("=" * 65)
-    print("TEST 2: Large K + few Sinkhorn iters (noisy Hessian)")
-    print("=" * 65)
+    def run_comparison(label, N_t, K_t, gamma_t, rho_t, sinkhorn_inner_t, n_iters_t, seed):
+        np.random.seed(seed)
 
-    np.random.seed(7)
+        D_t = np.random.randn(K_t, N_t, N_t) * 2.0
+        D_t = (D_t + D_t.transpose(0, 2, 1)) / 2
 
-    N2 = 10
-    K2 = 200
-    gamma2 = 1e-4
-    sinkhorn_inner2 = 1  # deliberately few → π is approximate → Hessian is noisy
+        true_beta_t = np.zeros(K_t)
+        true_beta_t[min(10, K_t-1)] = 0.8
+        true_beta_t[min(50, K_t-1)] = -0.6
+        true_beta_t[min(99, K_t-1)] = 0.3
+        n_true_nonzero = np.sum(np.abs(true_beta_t) > 0)
 
-    D2 = np.random.randn(K2, N2, N2) * 2.0
-    D2 = (D2 + D2.transpose(0, 2, 1)) / 2
+        C_t = build_cost(true_beta_t, D_t)
+        hat_pi_t = np.exp(-C_t)
+        hat_pi_t = hat_pi_t / hat_pi_t.sum()
+        p_t = hat_pi_t.sum(axis=1)
+        q_t = hat_pi_t.sum(axis=0)
 
-    true_beta2 = np.zeros(K2)
-    true_beta2[10] = 0.8
-    true_beta2[50] = -0.6
-    true_beta2[99] = 0.3
+        t0 = time.time()
+        b_pg, _, _, h_pg = sista(
+            p_t, q_t, hat_pi_t, D_t, gamma=gamma_t,
+            rho=rho_t, n_iters=n_iters_t, sinkhorn_inner=sinkhorn_inner_t, tol=1e-12
+        )
+        time_pg_t = time.time() - t0
 
-    C_true2 = build_cost(true_beta2, D2)
-    hat_pi2 = np.exp(-C_true2)
-    hat_pi2 = hat_pi2 / hat_pi2.sum()
-    p2 = hat_pi2.sum(axis=1)
-    q2 = hat_pi2.sum(axis=0)
+        t0 = time.time()
+        b_nw, _, _, h_nw = sista_newton(
+            p_t, q_t, hat_pi_t, D_t, gamma=gamma_t,
+            n_iters=n_iters_t, sinkhorn_inner=sinkhorn_inner_t, tol=1e-12
+        )
+        time_nw_t = time.time() - t0
 
-    n_iters2 = 200
+        print(f"\n{'=' * 65}")
+        print(f"{label}")
+        print(f"{'=' * 65}")
+        print(f"K={K_t}, N={N_t}, γ={gamma_t}, sinkhorn_inner={sinkhorn_inner_t}, rho={rho_t}")
+        print(f"\n{'Metric':<20} {'ProxGrad':>12} {'Newton':>12}")
+        print("-" * 45)
+        print(f"{'Iterations':<20} {len(h_pg):>12} {len(h_nw):>12}")
+        print(f"{'Wall time':<20} {time_pg_t:>11.4f}s {time_nw_t:>11.4f}s")
+        print(f"{'Final obj':<20} {h_pg[-1]:>12.6f} {h_nw[-1]:>12.6f}")
+        sp_pg = np.sum(np.abs(b_pg) < 1e-4)
+        sp_nw = np.sum(np.abs(b_nw) < 1e-4)
+        print(f"{'Zeros found':<20} {f'{sp_pg}/{K_t}':>12} {f'{sp_nw}/{K_t}':>12}  (true={K_t - n_true_nonzero}/{K_t})")
+        print(f"{'||β - β_true||':<20} {np.linalg.norm(b_pg - true_beta_t):>12.4f} {np.linalg.norm(b_nw - true_beta_t):>12.4f}")
 
-    t0 = time.time()
-    beta_pg2, _, _, hist_pg2 = sista(
-        p2, q2, hat_pi2, D2, gamma=gamma2,
-        rho=0.01, n_iters=n_iters2, sinkhorn_inner=sinkhorn_inner2, tol=1e-12
+        winner = "ProxGrad" if h_pg[-1] < h_nw[-1] else "Newton"
+        print(f"\n→ Winner: {winner}")
+
+    # =============================================
+    # TEST 2a: Only change = few Sinkhorn iterations (K stays small)
+    # Isolates the effect of noisy π / Hessian
+    # =============================================
+    run_comparison(
+        label="TEST 2a: Few Sinkhorn iterations (K=8, sinkhorn_inner=1)",
+        N_t=15, K_t=8, gamma_t=1e-3, rho_t=0.5,
+        sinkhorn_inner_t=1, n_iters_t=500, seed=42,
     )
-    time_pg2 = time.time() - t0
 
-    t0 = time.time()
-    beta_nw2, _, _, hist_nw2 = sista_newton(
-        p2, q2, hat_pi2, D2, gamma=gamma2,
-        n_iters=n_iters2, sinkhorn_inner=sinkhorn_inner2, tol=1e-12
+    # =============================================
+    # TEST 2b: Only change = large K (Sinkhorn stays well-converged)
+    # Isolates the effect of high dimensionality
+    # =============================================
+    run_comparison(
+        label="TEST 2b: Large K (K=200, sinkhorn_inner=10)",
+        N_t=10, K_t=200, gamma_t=1e-4, rho_t=0.01,
+        sinkhorn_inner_t=10, n_iters_t=200, seed=7,
     )
-    time_nw2 = time.time() - t0
 
-    print(f"\nK = {K2} dictionary elements, N = {N2}, sinkhorn_inner = {sinkhorn_inner2}")
-    print(f"\nIterations:     ProxGrad = {len(hist_pg2):<6}  Newton = {len(hist_nw2)}")
-    print(f"Wall time:      ProxGrad = {time_pg2:.4f}s   Newton = {time_nw2:.4f}s")
-    print(f"Final obj:      ProxGrad = {hist_pg2[-1]:.6f}  Newton = {hist_nw2[-1]:.6f}")
-
-    sparsity_pg2 = np.sum(np.abs(beta_pg2) < 1e-4)
-    sparsity_nw2 = np.sum(np.abs(beta_nw2) < 1e-4)
-    print(f"Zeros found:    ProxGrad = {sparsity_pg2}/{K2}    Newton = {sparsity_nw2}/{K2}  (true = {K2-3}/{K2})")
-    print(f"||β - β_true||: ProxGrad = {np.linalg.norm(beta_pg2 - true_beta2):.6f}"
-          f"  Newton = {np.linalg.norm(beta_nw2 - true_beta2):.6f}")
-
-    print(f"\nNonzero coefficients recovered (true indices: 10, 50, 99):")
-    for label, b in [("ProxGrad", beta_pg2), ("Newton  ", beta_nw2)]:
-        nonzero_idx = np.where(np.abs(b) > 1e-4)[0]
-        vals = b[nonzero_idx]
-        pairs = [f"β_{i}={v:.4f}" for i, v in zip(nonzero_idx, vals)]
-        print(f"  {label}: {', '.join(pairs) if pairs else '(all zero)'}")
+    # =============================================
+    # TEST 2c: Both together (large K + few Sinkhorn)
+    # =============================================
+    run_comparison(
+        label="TEST 2c: Both (K=200, sinkhorn_inner=1)",
+        N_t=10, K_t=200, gamma_t=1e-4, rho_t=0.01,
+        sinkhorn_inner_t=1, n_iters_t=200, seed=7,
+    )
